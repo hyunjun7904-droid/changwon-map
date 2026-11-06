@@ -32,6 +32,15 @@
   .sub { font-size:12px; color:var(--muted); margin-top:2px; }
   .memo { font-size:12px; color:#92400e; margin-top:3px; }
   .pop .nm { font-size:15px; }
+  #detail { display:none; flex:1; overflow-y:auto; padding:10px 16px 24px; }
+  #side.detail-mode #detail { display:block; }
+  #side.detail-mode #list, #side.detail-mode header { display:none; }
+  #detail .back { border:none; background:none; color:var(--accent); font-size:15px; padding:4px 0 10px; cursor:pointer; }
+  #detail .pop .nm { font-size:18px; }
+  #detail .pop > div { margin-bottom:2px; }
+  #detail .hist { max-height:none; }
+  #detail .pop textarea { height:60px; }
+  #detail .links { font-size:15px; gap:18px; margin-top:10px; }
   .pop a { color:var(--accent); text-decoration:none; }
   .btns { display:flex; gap:4px; flex-wrap:wrap; margin:8px 0 6px; }
   .btns button { border:1px solid var(--line); background:#fff; border-radius:14px; padding:3px 9px; font-size:12px; cursor:pointer; }
@@ -102,6 +111,7 @@
       <div class="stats" id="stats"></div>
     </header>
     <div id="list"></div>
+    <div id="detail"></div>
   </aside>
   <div id="map"></div>
 </div>
@@ -142,8 +152,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const markers = {};
 data.forEach(d => {
   const m = L.circleMarker([d.y, d.x], { radius: 7, weight: 1.5, color: '#fff', fillOpacity: .9, fillColor: STATUS[st(d)].hex });
-  m.bindPopup(() => popup(d), { minWidth: 260, maxWidth: 300, autoPanPadding: [8, 8] });
-  m.on('popupopen', () => select(d.id, false));
+  m.on('click', () => open(d, false));
   markers[d.id] = m;
 });
 
@@ -222,10 +231,41 @@ function render(fit) {
 document.getElementById('list').addEventListener('click', e => {
   const el = e.target.closest('.item[data-id]');
   if (!el) return;
-  const d = data.find(x => x.id === el.dataset.id);
-  map.setView([d.y, d.x], Math.max(map.getZoom(), 16), { animate: false });
-  markers[d.id].openPopup();
+  open(data.find(x => x.id === el.dataset.id), true);
 });
+
+// 업체 열기: 휴대폰은 아래 패널에 상세 화면, PC는 지도 팝업
+const isMobile = () => matchMedia('(max-width:760px)').matches;
+const side = document.getElementById('side');
+const detail = document.getElementById('detail');
+let hilite = null;
+function open(d, fromList) {
+  if (hilite) hilite.setStyle({ radius: 7, weight: 1.5, color: '#fff' });
+  hilite = markers[d.id].setStyle({ radius: 11, weight: 3, color: '#111' }).bringToFront();
+  if (!isMobile()) {
+    if (fromList) map.setView([d.y, d.x], Math.max(map.getZoom(), 16), { animate: false });
+    L.popup({ minWidth: 260, maxWidth: 300, autoPanPadding: [8, 8] }).setLatLng([d.y, d.x]).setContent(popup(d)).openOn(map);
+    select(d.id);
+    return;
+  }
+  selected = d.id;
+  detail.innerHTML = '';
+  const back = Object.assign(document.createElement('button'), { className: 'back', textContent: '← 목록으로' });
+  back.addEventListener('click', () => history.back());
+  detail.append(back, popup(d));
+  // 휴대폰 뒤로가기 버튼으로 목록에 돌아오도록 기록 하나 추가
+  if (!side.classList.contains('detail-mode')) history.pushState({ detail: 1 }, '');
+  side.classList.add('detail-mode');
+  detail.scrollTop = 0;
+  map.setView([d.y, d.x], Math.max(map.getZoom(), 16), { animate: !fromList });
+}
+function closeDetail() {
+  side.classList.remove('detail-mode');
+  if (hilite) { hilite.setStyle({ radius: 7, weight: 1.5, color: '#fff' }); hilite = null; }
+  if (selected) select(selected);
+}
+window.addEventListener('popstate', () => { if (side.classList.contains('detail-mode')) closeDetail(); });
+map.on('popupclose', () => { if (hilite && !isMobile()) { hilite.setStyle({ radius: 7, weight: 1.5, color: '#fff' }); hilite = null; } });
 
 function select(id, scroll = true) {
   selected = id;
