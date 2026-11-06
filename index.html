@@ -32,6 +32,10 @@
   .sub { font-size:12px; color:var(--muted); margin-top:2px; }
   .memo { font-size:12px; color:#92400e; margin-top:3px; }
   .pop .nm { font-size:15px; }
+  .locate { width:44px; height:44px; border-radius:50%; border:none; background:#fff; color:#2563eb; cursor:pointer;
+            box-shadow:0 2px 8px rgba(0,0,0,.25); display:flex; align-items:center; justify-content:center; margin-bottom:8px !important; }
+  .locate.busy svg { animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   #detail { display:none; flex:1; overflow-y:auto; padding:10px 16px 24px; }
   #side.detail-mode #detail { display:block; }
   #side.detail-mode #list, #side.detail-mode header { display:none; }
@@ -176,15 +180,44 @@ const q = document.getElementById('q');
 [dongSel, statusSel].forEach(el => el.addEventListener('change', () => render(true)));
 q.addEventListener('input', () => render(false));
 
-let origin = null, selected = null;
-document.getElementById('near').addEventListener('click', () => {
-  if (!navigator.geolocation) return;
+// 내 위치: 처음 찾으면 지도를 옮기고, 이후엔 움직이는 대로 파란 점만 따라감
+let origin = null, selected = null, myPos = null, myDot = null, myAcc = null, watchId = null;
+function showMe(p) {
+  myPos = [p.coords.latitude, p.coords.longitude];
+  if (!myDot) {
+    myAcc = L.circle(myPos, { radius: p.coords.accuracy, color: '#2563eb', weight: 1, fillColor: '#60a5fa', fillOpacity: .12, interactive: false }).addTo(map);
+    myDot = L.circleMarker(myPos, { radius: 8, weight: 3, color: '#fff', fillColor: '#2563eb', fillOpacity: 1, interactive: false }).addTo(map);
+  }
+  myDot.setLatLng(myPos).bringToFront();
+  myAcc.setLatLng(myPos).setRadius(p.coords.accuracy);
+}
+function locate(then) {
+  if (!navigator.geolocation) return toast('이 브라우저는 위치 찾기를 지원하지 않습니다');
+  locBtn.classList.add('busy');
   navigator.geolocation.getCurrentPosition(p => {
-    origin = [p.coords.latitude, p.coords.longitude];
-    L.circleMarker(origin, { radius: 6, color: '#2563eb', fillColor: '#60a5fa', fillOpacity: 1 }).addTo(map);
-    render(false);
-  }, () => {});
+    locBtn.classList.remove('busy');
+    showMe(p);
+    if (watchId === null) watchId = navigator.geolocation.watchPosition(showMe, () => {}, { enableHighAccuracy: true, maximumAge: 5000 });
+    then();
+  }, err => {
+    locBtn.classList.remove('busy');
+    toast(err.code === 1 ? '위치 권한을 허용해 주세요 (설정 → 사이트 권한 → 위치)' : '현재 위치를 찾지 못했습니다');
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 });
+}
+const LocateControl = L.Control.extend({
+  options: { position: 'bottomright' },
+  onAdd() {
+    const b = L.DomUtil.create('button', 'locate');
+    b.title = '내 위치';
+    b.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="8"/></svg>';
+    L.DomEvent.disableClickPropagation(b);
+    L.DomEvent.on(b, 'click', () => locate(() => map.setView(myPos, Math.max(map.getZoom(), 16))));
+    return b;
+  },
 });
+new LocateControl().addTo(map);
+const locBtn = document.querySelector('.locate');
+document.getElementById('near').addEventListener('click', () => locate(() => { origin = myPos; render(false); toast('현재 위치에서 가까운 순으로 정렬했습니다'); }));
 
 function filtered() {
   const dg = dongSel.value, s = statusSel.value, k = q.value.trim().toLowerCase();
