@@ -18,6 +18,11 @@
   #list, #detail { overscroll-behavior:contain; }
   #app { display:flex; height:100%; }
   .grip { display:none; }
+  /* 확대하면 핀 옆에 상호 표시 (누르면 상세) */
+  .leaflet-tooltip.lbl { background:rgba(255,255,255,.93); border:1px solid #cbd5e1; border-radius:4px; padding:1px 5px; font-size:11px;
+                         font-weight:600; color:#1f2937; box-shadow:0 1px 2px rgba(0,0,0,.12); white-space:nowrap; cursor:pointer; }
+  .leaflet-tooltip.lbl::before { display:none; }
+  .leaflet-tooltip.lbl.off { color:#9ca3af; text-decoration:line-through; }
   .choose-t { font-size:13px; color:var(--muted); margin:2px 0 6px; }
   .choose .item { padding:9px 4px; }
   .leaflet-popup-content .choose { max-height:260px; overflow-y:auto; margin:0 -4px; }
@@ -198,7 +203,8 @@ const phoneOf = d => ('np' in V(d) ? V(d).np : d.phone) || '';
 const oldName = d => (nameOf(d) !== d.name ? d.name : d.old);
 const isClosed = d => ('x' in V(d) ? !!V(d).x : d.closed);
 
-const map = L.map('map', { zoomControl: !matchMedia('(pointer: coarse)').matches }) // 터치 기기는 두 손가락 확대로 충분.setView([35.26, 128.66], 12);
+// 터치 기기는 두 손가락 확대로 충분해서 +/- 버튼 숨김
+const map = L.map('map', { zoomControl: !matchMedia('(pointer: coarse)').matches }).setView([35.26, 128.66], 12);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; OpenStreetMap',
 }).addTo(map);
@@ -313,9 +319,81 @@ function render(fit) {
     (todayCnt ? `<span>· 오늘 <b>${todayCnt}</b>곳 방문</span>` : '') +
     (closedCnt && statusSel.value !== '@closed' ? `<span>· 폐업 ${closedCnt}곳 숨김</span>` : '');
   updGrip();
+  layout();
   if (fit && list.length) map.fitBounds(L.latLngBounds(list.map(d => [d.y, d.x])), { padding: [30, 30], maxZoom: 16 });
 }
 let lastCount = 0;
+
+// 확대 단계별 표시: 16 이상이면 같은 자리 핀을 동그랗게 펼치고(가는 선이 실제 위치), 17 이상이면 상호 표시
+const SPREAD_Z = 16, LABEL_Z = 17;
+const legs = L.layerGroup().addTo(map);
+function layout() {
+  if (!map._loaded) return;
+  legs.clearLayers();
+  const z = map.getZoom();
+  const vis = data.filter(d => map.hasLayer(markers[d.id]));
+  vis.forEach(d => { d._dx = 0; markers[d.id].setLatLng([d.y, d.x]); });
+  if (z >= SPREAD_Z) {
+    // 핀끼리 GAP px보다 가까우면 서로 밀어냄 (겹친 만큼만 움직이고, 같은 좌표는 조금씩 다른 방향으로 출발)
+    const GAP = 24, pts = vis.map((d, i) => {
+      const p = map.project([d.y, d.x], z), a = i * 2.39996;
+      return { d, p, x: p.x + Math.cos(a) * 0.5, y: p.y + Math.sin(a) * 0.5 };
+    });
+    for (let it = 0; it < 80; it++) {
+      const grid = new Map(), key = (gx, gy) => gx * 100003 + gy;
+      pts.forEach(o => { const k = key(Math.floor(o.x / GAP), Math.floor(o.y / GAP)); (grid.get(k) || grid.set(k, []).get(k)).push(o); });
+      let moved = false;
+      for (const o of pts) {
+        const gx = Math.floor(o.x / GAP), gy = Math.floor(o.y / GAP);
+        for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const b of grid.get(key(gx + i, gy + j)) || []) {
+          if (b === o) continue;
+          const dx = o.x - b.x, dy = o.y - b.y, dist = Math.hypot(dx, dy);
+          if (dist >= GAP) continue;
+          const push = (GAP - dist) / 2 + 0.1, ux = dist ? dx / dist : 1, uy = dist ? dy / dist : 0;
+          o.x += ux * push / 2; o.y += uy * push / 2; b.x -= ux * push / 2; b.y -= uy * push / 2;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    for (const o of pts) {
+      if (Math.hypot(o.x - o.p.x, o.y - o.p.y) < 2) continue;
+      const ll = map.unproject(L.point(o.x, o.y), z);
+      o.d._dx = o.x - o.p.x;
+      markers[o.d.id].setLatLng(ll);
+      L.polyline([[o.d.y, o.d.x], ll], { color: '#64748b', weight: 1, opacity: .6, interactive: false }).addTo(legs);
+    }
+  }
+  labels();
+}
+const shortName = s => s.replace(/\s*(부동산)?(공인중개사|중개)\s*(사무소|사무실)$|\s*공인중개사$/, '').trim() || s;
+function labels() {
+  const on = map.getZoom() >= LABEL_Z, b = map.getBounds().pad(0.3);
+  data.forEach(d => {
+    const m = markers[d.id];
+    if (!m) return;
+    const show = on && map.hasLayer(m) && b.contains(m.getLatLng());
+    let t = m.getTooltip();
+    if (!show) { if (t) m.unbindTooltip(); return; }
+    const left = d._dx < -3; // 왼쪽으로 밀린 핀은 글자도 왼쪽에
+    if (!t || t._left !== left) {
+      if (t) m.unbindTooltip();
+      m.bindTooltip(' ', { permanent: true, interactive: true, direction: left ? 'left' : 'right', offset: [left ? -7 : 7, 0], className: 'lbl' });
+      t = m.getTooltip(); t._left = left;
+    }
+    const html = `<span data-id="${d.id}">${esc(shortName(nameOf(d)))}</span>`;
+    if (t._html !== html) { t.setContent(html); t._html = html; }
+    if (!m.isTooltipOpen()) m.openTooltip();
+  });
+}
+// 상호 글자를 눌러도 그 부동산이 열림
+map.getContainer().addEventListener('click', e => {
+  const s = e.target.closest('.leaflet-tooltip.lbl');
+  const id = s && s.querySelector('[data-id]') && s.querySelector('[data-id]').dataset.id;
+  if (id) { e.stopPropagation(); pick(data.find(x => x.id === id)); }
+});
+map.on('zoomend', layout);
+map.on('moveend', labels);
 const itemHtml = d => `
     <div class="item${d.id === selected ? ' sel' : ''}${isClosed(d) ? ' closed' : ''}" data-id="${d.id}">
       <span class="dot" style="background:${isClosed(d) ? '#9ca3af' : STATUS[st(d)].color}"></span>
@@ -346,7 +424,7 @@ function open(d, fromList) {
   cross.classList.remove('on');
   if (!isMobile()) {
     if (fromList) map.setView([d.y, d.x], Math.max(map.getZoom(), 16), { animate: false });
-    pcPopup = L.popup({ minWidth: 260, maxWidth: 300, autoPanPadding: [8, 8] }).setLatLng([d.y, d.x]).setContent(popup(d)).openOn(map);
+    pcPopup = L.popup({ minWidth: 260, maxWidth: 300, autoPanPadding: [8, 8] }).setLatLng(markers[d.id].getLatLng()).setContent(popup(d)).openOn(map);
     select(d.id);
     return;
   }
@@ -384,9 +462,10 @@ document.getElementById('grip').addEventListener('click', () => setMini(!side.cl
 
 // 핀이 겹쳐 있으면 그 자리의 부동산 목록을 보여 주고 고르게 함
 function pick(d) {
-  const p = map.latLngToContainerPoint([d.y, d.x]), r = isMobile() ? 22 : 14;
+  if (map.getZoom() >= SPREAD_Z) return open(d, false); // 이 단계부터는 핀이 펼쳐져 있음
+  const p = map.latLngToContainerPoint(markers[d.id].getLatLng()), r = isMobile() ? 22 : 14;
   const near = data.filter(x => markers[x.id] && map.hasLayer(markers[x.id]))
-    .map(x => ({ x, k: map.latLngToContainerPoint([x.y, x.x]).distanceTo(p) })).filter(o => o.k <= r)
+    .map(x => ({ x, k: map.latLngToContainerPoint(markers[x.id].getLatLng()).distanceTo(p) })).filter(o => o.k <= r)
     .sort((a, b) => a.k - b.k).map(o => o.x);
   if (near.length <= 1) return open(d, false);
   if (near.length > 8 && map.getZoom() < 17) return map.setView([d.y, d.x], map.getZoom() + 2); // 너무 많으면 먼저 확대
